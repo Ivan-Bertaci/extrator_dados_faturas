@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Extrator de Faturas de Energia</title>
+    <!-- Tailwind CSS para estilização -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Biblioteca pdf.js para ler arquivos PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.min.js"></script>
+    <!-- Biblioteca SheetJS (xlsx) para gerar arquivos Excel -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- Ícones Lucide -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        /* Estilos personalizados para a área de arrastar e soltar e para o loader */
+        #drop-zone {
+            border: 2px dashed #ccc;
+            border-radius: 0.5rem;
+            padding: 2rem;
+            text-align: center;
+            transition: border-color 0.3s, background-color 0.3s;
+        }
+        #drop-zone.dragover {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3b82f6;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="container mx-auto p-4 sm:p-6 lg:p-8">
+        <div class="bg-white p-8 rounded-2xl shadow-lg max-w-5xl mx-auto">
+            
+            <header class="text-center mb-8">
+                <h1 class="text-3xl sm:text-4xl font-bold text-gray-800">Extrator de Faturas de Energia</h1>
+                <p class="text-gray-500 mt-2">Envie suas faturas em PDF para extrair, salvar e exportar os dados.</p>
+            </header>
+
+            <!-- Área de Upload -->
+            <div id="drop-zone" class="mb-6">
+                <div class="flex flex-col items-center justify-center">
+                     <i data-lucide="upload-cloud" class="w-16 h-16 text-gray-400 mb-4"></i>
+                    <p class="text-gray-600">Arraste e solte os arquivos PDF aqui</p>
+                    <p class="text-gray-500 text-sm my-2">ou</p>
+                    <label for="pdf-upload" class="cursor-pointer bg-blue-500 text-white px-6 py-2 rounded-lg font-semibold hover:bg-blue-600 transition-colors">
+                        Selecione os Arquivos
+                    </label>
+                    <input type="file" id="pdf-upload" multiple accept=".pdf" class="hidden">
+                </div>
+            </div>
+            
+             <!-- Feedback para o usuário -->
+            <div id="status" class="text-center text-sm text-gray-600 mb-6 min-h-[20px]"></div>
+            <div id="loader" class="hidden mx-auto loader mb-6"></div>
+
+
+            <!-- Tabela de Dados Extraídos -->
+            <div class="mb-6">
+                <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
+                    <h2 class="text-2xl font-semibold text-gray-700">Dados Extraídos</h2>
+                    <div class="flex gap-2">
+                         <button id="clear-data" class="bg-red-500 text-white px-5 py-2 rounded-lg font-semibold hover:bg-red-600 transition-colors flex items-center gap-2 disabled:bg-gray-400 disabled:cursor-not-allowed" disabled>
+                            <i data-lucide="trash-2" class="w-5 h-5"></i>
+                            Limpar Dados
+                        </button>
+                        <button id="export-excel" class="bg-green-600 text-white px-5 py-2 rounded-lg font-semibold hover:bg-green-700 transition-colors flex items-center gap-2 disabled:bg-gray-400 disabled:cursor-not-allowed" disabled>
+                            <i data-lucide="file-spreadsheet" class="w-5 h-5"></i>
+                            Exportar para Excel
+                        </button>
+                    </div>
+                </div>
+                <div class="overflow-x-auto rounded-lg border">
+                    <table class="min-w-full bg-white text-sm">
+                        <thead class="bg-gray-100">
+                            <tr>
+                                <th class="p-3 text-left font-semibold text-gray-600">Unidade Consumidora</th>
+                                <th class="p-3 text-left font-semibold text-gray-600">Instalação</th>
+                                <th class="p-3 text-left font-semibold text-gray-600">Conta Mês</th>
+                                <th class="p-3 text-right font-semibold text-gray-600">Qtd. Faturada (kWh)</th>
+                                <th class="p-3 text-right font-semibold text-gray-600">Valor IRRF (R$)</th>
+                                <th class="p-3 text-right font-semibold text-gray-600">Total a Pagar (R$)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="data-table-body">
+                           <!-- Linhas de dados serão inseridas aqui via JavaScript -->
+                           <tr id="placeholder-row">
+                               <td colspan="6" class="p-4 text-center text-gray-500">Nenhum dado extraído ainda. Envie um arquivo PDF para começar.</td>
+                           </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Módulos do Firebase -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, getDocs, writeBatch, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        let firebaseConfig;
+        try {
+            firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "DEMO", authDomain: "DEMO", projectId: "DEMO" };
+        } catch (e) {
+            console.error("Erro ao carregar configuração do Firebase:", e);
+            firebaseConfig = { apiKey: "DEMO", authDomain: "DEMO", projectId: "DEMO" };
+        }
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        setLogLevel('debug');
+
+        const faturasCollection = collection(db, `/artifacts/${appId}/public/data/faturas`);
+        
+        let localData = [];
+
+        async function setupAuth() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                console.log("Autenticação com Firebase bem-sucedida.");
+                setupRealtimeListener();
+            } catch (error) {
+                console.error("Erro na autenticação com Firebase:", error);
+                document.getElementById('status').textContent = 'Erro de autenticação com o banco de dados.';
+            }
+        }
+        
+        function setupRealtimeListener() {
+            const q = query(faturasCollection);
+            onSnapshot(q, (snapshot) => {
+                const dataTableBody = document.getElementById('data-table-body');
+                
+                localData = [];
+                snapshot.forEach(doc => {
+                    const data = doc.data();
+                    data.id = doc.id;
+                    localData.push(data);
+                });
+
+                localData.sort((a, b) => a.nomeUnidade.localeCompare(b.nomeUnidade));
+
+                if (localData.length > 0) {
+                    dataTableBody.innerHTML = localData.map(createTableRow).join('');
+                    document.getElementById('export-excel').disabled = false;
+                    document.getElementById('clear-data').disabled = false;
+                } else {
+                    dataTableBody.innerHTML = `<tr id="placeholder-row"><td colspan="6" class="p-4 text-center text-gray-500">Nenhum dado extraído ainda. Envie um arquivo PDF para começar.</td></tr>`;
+                    document.getElementById('export-excel').disabled = true;
+                    document.getElementById('clear-data').disabled = true;
+                }
+            }, (error) => {
+                console.error("Erro ao receber dados do Firestore:", error);
+                document.getElementById('status').textContent = 'Erro ao conectar com o banco de dados.';
+            });
+        }
+
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('pdf-upload');
+        const statusDiv = document.getElementById('status');
+        const loader = document.getElementById('loader');
+        const exportButton = document.getElementById('export-excel');
+        const clearButton = document.getElementById('clear-data');
+
+        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.worker.min.js`;
+
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) handleFiles(e.dataTransfer.files);
+        });
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) handleFiles(fileInput.files);
+        });
+
+        async function handleFiles(files) {
+            loader.style.display = 'block';
+            statusDiv.textContent = 'Iniciando processamento...';
+            let filesProcessed = 0;
+            
+            for (const file of files) {
+                filesProcessed++;
+                if (file.type !== 'application/pdf') {
+                    statusDiv.textContent = `Arquivo '${file.name}' não é um PDF. Pulando...`;
+                    continue;
+                }
+                
+                statusDiv.textContent = `Processando arquivo ${filesProcessed} de ${files.length}: ${file.name}...`;
+                try {
+                    await processPdf(file);
+                } catch (error) {
+                     console.error(`Erro ao processar ${file.name}:`, error);
+                     statusDiv.textContent = `Ocorreu um erro ao processar o arquivo ${file.name}.`;
+                }
+            }
+
+            loader.style.display = 'none';
+            statusDiv.textContent = 'Processamento concluído.';
+        }
+
+        function processPdf(file) {
+            return new Promise((resolve, reject) => {
+                const fileReader = new FileReader();
+                fileReader.onload = async function() {
+                    try {
+                        const typedarray = new Uint8Array(this.result);
+                        const pdf = await pdfjsLib.getDocument(typedarray).promise;
+
+                        for (let i = 1; i <= pdf.numPages; i++) {
+                            const page = await pdf.getPage(i);
+                            const textContent = await page.getTextContent();
+                            const pageText = textContent.items.map(item => item.str).join('\n');
+                            
+                            const extractedData = extractDataFromText(pageText);
+                            
+                            if (extractedData) {
+                                try {
+                                    await addDoc(faturasCollection, extractedData);
+                                } catch (error) {
+                                    console.error("Erro ao salvar dados no Firestore: ", error);
+                                }
+                            } else {
+                                console.log(`Nenhum dado válido extraído da página ${i} do arquivo ${file.name}.`);
+                            }
+                        }
+                        resolve();
+                    } catch (error) {
+                        reject(error);
+                    }
+                };
+                fileReader.onerror = () => reject(new Error('Erro ao ler o arquivo.'));
+                fileReader.readAsArrayBuffer(file);
+            });
+        }
+        
+        function extractDataFromText(text) {
+            const lines = text.split('\n');
+            const cleanNumber = (str) => {
+                if (!str) return 0;
+                return parseFloat(String(str).replace(/\./g, '').replace(',', '.'));
+            };
+
+            const data = {
+                nomeUnidade: null,
+                instalacao: null,
+                contaMes: null,
+                totalPagar: null,
+                valorIRRF: null,
+                qtdFaturada: null
+            };
+
+            const unidadeIndex = lines.findIndex(line => line.trim().toUpperCase() === 'DADOS DA UNIDADE CONSUMIDORA');
+            if (unidadeIndex !== -1 && lines[unidadeIndex + 1]) {
+                data.nomeUnidade = lines[unidadeIndex + 1].trim();
+            } else {
+                return null;
+            }
+            
+            const fullTextSingleLine = lines.join(' ');
+
+            // Padrões de busca (Regex)
+            const patterns = {
+                instalacao: /INSTALAÇÃO\s*(\d[\d\s]*\d)/,
+                contaMes: /CONTA M[ÊE]S\s*([A-Z]{3}\/\d{4})/,
+                totalPagar: /TOTAL A PAGAR\s*([\d\.,]+)/,
+                irrf: /Retenção Consumo IRRF-1,2%\s*([\d\.,]+)/,
+                qtd: /(Consumo Uso Sistema|Custo Disp Uso Sistema) \(KWH-TUSD\s+[A-Z]{3}\/\d{2}\s+([\d\.,]+)/
+            };
+
+            let match;
+
+            match = fullTextSingleLine.match(patterns.instalacao);
+            if (match) data.instalacao = match[1].replace(/\s/g, '');
+
+            match = fullTextSingleLine.match(patterns.contaMes);
+            if (match) data.contaMes = match[1];
+
+            match = fullTextSingleLine.match(patterns.totalPagar);
+            if (match) data.totalPagar = match[1];
+            else {
+                match = fullTextSingleLine.match(/Total Consolidado\s*([\d\.,]+)/);
+                if (match) data.totalPagar = match[1];
+            }
+            
+            match = fullTextSingleLine.match(patterns.irrf);
+            if (match) data.valorIRRF = match[1];
+
+            match = fullTextSingleLine.match(patterns.qtd);
+            if (match) data.qtdFaturada = match[2];
+
+
+            if (!data.instalacao || !data.totalPagar) {
+                console.warn("Dados essenciais não encontrados para:", data.nomeUnidade);
+                return null;
+            }
+
+            return {
+                nomeUnidade: data.nomeUnidade,
+                instalacao: data.instalacao,
+                contaMes: data.contaMes || 'Não encontrado',
+                totalPagar: cleanNumber(data.totalPagar),
+                valorIRRF: cleanNumber(data.valorIRRF),
+                qtdFaturada: cleanNumber(data.qtdFaturada)
+            };
+        }
+
+        function createTableRow(data) {
+            return `
+                <tr class="border-b hover:bg-gray-50">
+                    <td class="p-3">${data.nomeUnidade}</td>
+                    <td class="p-3">${data.instalacao}</td>
+                    <td class="p-3">${data.contaMes}</td>
+                    <td class="p-3 text-right">${(data.qtdFaturada || 0).toLocaleString('pt-BR')}</td>
+                    <td class="p-3 text-right">${(data.valorIRRF || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
+                    <td class="p-3 text-right font-semibold text-gray-800">${(data.totalPagar || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}</td>
+                </tr>
+            `;
+        }
+
+        async function clearAllData() {
+            statusDiv.textContent = 'Limpando dados do banco de dados...';
+            loader.style.display = 'block';
+            try {
+                const querySnapshot = await getDocs(faturasCollection);
+                const batch = writeBatch(db);
+                querySnapshot.forEach((doc) => {
+                    batch.delete(doc.ref);
+                });
+                await batch.commit();
+                statusDiv.textContent = 'Todos os dados foram removidos.';
+            } catch (error) {
+                console.error("Erro ao limpar dados: ", error);
+                statusDiv.textContent = 'Ocorreu um erro ao limpar os dados.';
+            } finally {
+                loader.style.display = 'none';
+            }
+        }
+
+        function exportToExcel() {
+            if (localData.length === 0) {
+                alert('Não há dados para exportar.');
+                return;
+            }
+            const dataToExport = localData.map(item => ({
+                'Unidade Consumidora': item.nomeUnidade,
+                'Instalação': item.instalacao,
+                'Conta Mês': item.contaMes,
+                'Quantidade Faturada (kWh)': item.qtdFaturada,
+                'Valor IRRF (R$)': item.valorIRRF,
+                'Total a Pagar (R$)': item.totalPagar
+            }));
+            const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, 'Faturas');
+            XLSX.writeFile(workbook, 'dados_faturas.xlsx');
+        }
+
+        exportButton.addEventListener('click', exportToExcel);
+        clearButton.addEventListener('click', clearAllData);
+
+        lucide.createIcons();
+        setupAuth();
+    </script>
+</body>
+</html>
