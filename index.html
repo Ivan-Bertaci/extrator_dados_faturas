@@ -258,8 +258,9 @@
         function extractDataFromText(text) {
             const lines = text.split('\n');
             const cleanNumber = (str) => {
-                if (!str) return 0;
-                return parseFloat(String(str).replace(/\./g, '').replace(',', '.'));
+                if (!str || typeof str !== 'string') return 0;
+                // Remove a thousand separators (.) and replaces the decimal comma (,) with a dot.
+                return parseFloat(str.replace(/\./g, '').replace(',', '.'));
             };
 
             const data = {
@@ -271,77 +272,100 @@
                 qtdFaturada: null
             };
 
-            const unidadeIndex = lines.findIndex(line => line.trim().toUpperCase() === 'DADOS DA UNIDADE CONSUMIDORA');
-            if (unidadeIndex !== -1 && lines[unidadeIndex + 1]) {
-                data.nomeUnidade = lines[unidadeIndex + 1].trim();
-            } else {
-                console.error("Bloco 'DADOS DA UNIDADE CONSUMIDORA' não encontrado.");
+            // 1. EXTRACT CONSUMER UNIT NAME (ESSENTIAL)
+            const unidadeIndex = lines.findIndex(line => line.toUpperCase().includes('DADOS DA UNIDADE CONSUMIDORA'));
+            if (unidadeIndex !== -1) {
+                // The name is usually on the next non-empty line.
+                for (let i = unidadeIndex + 1; i < Math.min(unidadeIndex + 3, lines.length); i++) {
+                    const potentialName = lines[i].trim();
+                    if (potentialName && potentialName.length > 5) {
+                        data.nomeUnidade = potentialName;
+                        break;
+                    }
+                }
+            }
+            
+            if (!data.nomeUnidade) {
+                console.error("Could not extract Consumer Unit Name. The invoice will be ignored.");
                 return null;
             }
 
+            // 2. EXTRACT OTHER DATA USING A FULL SCAN
             lines.forEach((line, index) => {
-                // INSTALAÇÃO
-                if (!data.instalacao) {
-                    let match = line.match(/INSTALAÇÃO\s*(\d[\d\s]*\d)/);
+                const upperLine = line.toUpperCase();
+
+                // INSTALLATION
+                if (!data.instalacao && upperLine.includes('INSTALAÇÃO')) {
+                    // Tries to find on the same line
+                    let match = line.match(/INSTALAÇÃO\s*(\d[\d\s]*\d)/i);
                     if (match && match[1]) {
                         data.instalacao = match[1].replace(/\s/g, '');
-                    } else if (line.includes('INSTALAÇÃO') && lines[index + 1]) {
-                         let nextLineMatch = lines[index + 1].match(/^(\d[\d\s]*\d)$/);
-                         if (nextLineMatch) {
-                             data.instalacao = nextLineMatch[1].replace(/\s/g, '');
-                         }
+                    } else {
+                        // If not found, searches the entire line for a number with 7+ digits
+                        match = line.match(/(\d[\d\s]{6,}\d)/);
+                        if (match) data.instalacao = match[1].replace(/\s/g, '');
                     }
                 }
                 
-                // CONTA MÊS
+                // BILLING MONTH
                 if (!data.contaMes) {
-                    let match = line.match(/([A-Z]{3}\/\d{4})/);
-                    if (match && (line.toUpperCase().includes('CONTA MÊS') || lines[index-1]?.toUpperCase().includes('CONTA MÊS'))) {
+                    const match = line.match(/([A-Z]{3}\/\d{4})/);
+                    if (match && (upperLine.includes('CONTA MÊS') || (lines[index-1] && lines[index-1].toUpperCase().includes('CONTA MÊS')))) {
                         data.contaMes = match[1];
                     }
                 }
 
-                // TOTAL A PAGAR
-                if (!data.totalPagar) {
-                    let match = line.match(/TOTAL A PAGAR\s*([\d\.,]+)/);
+                // TOTAL TO PAY
+                if (!data.totalPagar && upperLine.includes('TOTAL A PAGAR')) {
+                    const match = line.match(/([\d\.,]+)/);
                     if (match && match[1]) {
                         data.totalPagar = match[1];
                     }
                 }
 
-                // VALOR IRRF
-                if (!data.valorIRRF) {
-                    let match = line.match(/Retenção Consumo IRRF-1,2%\s*([\d\.,]+)/);
+                // IRRF VALUE
+                if (!data.valorIRRF && line.includes('Retenção Consumo IRRF')) {
+                    const match = line.match(/([\d\.,]+)/);
                     if (match && match[1]) {
                         data.valorIRRF = match[1];
                     }
                 }
 
-                // QUANTIDADE FATURADA
-                if (!data.qtdFaturada) {
-                    if (line.includes('Consumo Uso Sistema (KWH-TUSD') || line.includes('Custo Disp Uso Sistema TUSD')) {
-                        let match = line.match(/\s+([\d\.,]+)\s+KWh?/);
-                        if (match && match[1]) {
-                            data.qtdFaturada = match[1];
-                        }
-                    }
+                // BILLED QUANTITY
+                if (!data.qtdFaturada && (line.includes('Consumo Uso Sistema (KWH-TUSD') || line.includes('Custo Disp Uso Sistema TUSD'))) {
+                     const relevantLine = lines.slice(index, index + 3).join(' ');
+                     const match = relevantLine.match(/([A-Z]{3}\/\d{2,})\s+([\d\.,]+)\s+KWh/i);
+                     if(match && match[2]) {
+                         data.qtdFaturada = match[2];
+                     }
                 }
             });
 
+            // 3. FINAL ATTEMPTS (FALLBACKS)
             if (!data.totalPagar) {
-                const totalConsolidadoLine = lines.find(l => l.includes('Total Consolidado'));
-                if (totalConsolidadoLine) {
-                    let match = totalConsolidadoLine.match(/([\d\.,]+)/);
+                const totalLine = lines.find(l => l.includes('Total Consolidado'));
+                if (totalLine) {
+                    const match = totalLine.match(/([\d\.,]+)/);
                     if (match) data.totalPagar = match[1];
                 }
             }
+            
+            // Fallback for billing month if it's in a different format
+            if (!data.contaMes) {
+                const fullText = lines.join(' ');
+                const match = fullText.match(/CONTA M[ÊE]S\s*([A-Z]{3}\/\d{4})/i);
+                if (match) data.contaMes = match[1];
+            }
+            
+            if (!data.instalacao) {
+                const fullText = lines.join(' ');
+                const match = fullText.match(/INSTALAÇÃO\s*(\d[\d\s]*\d)/i);
+                if (match) data.instalacao = match[1].replace(/\s/g, '');
+            }
 
-            if (!data.instalacao || !data.totalPagar || !data.nomeUnidade) {
-                console.warn("Dados essenciais não encontrados. Fatura ignorada.", {
-                    nome: data.nomeUnidade,
-                    instalacao: data.instalacao,
-                    total: data.totalPagar
-                });
+            // 4. FINAL VALIDATION
+            if (!data.instalacao || !data.totalPagar) {
+                console.warn("Essential data (Installation or Total to Pay) not found for:", data.nomeUnidade);
                 return null;
             }
 
