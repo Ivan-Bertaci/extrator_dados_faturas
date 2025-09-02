@@ -201,8 +201,7 @@
                             for (let i = 1; i <= pdf.numPages; i++) {
                                 const page = await pdf.getPage(i);
                                 const textContent = await page.getTextContent();
-                                // We join with spaces to handle cases where a single value is split into multiple items
-                                const pageText = textContent.items.map(item => item.str).join(' '); 
+                                const pageText = textContent.items.map(item => item.str).join('\n');
                                 
                                 const extractedData = extractDataFromText(pageText);
                                 
@@ -224,6 +223,7 @@
             };
             
             const extractDataFromText = (text) => {
+                const lines = text.split('\n');
                 const cleanNumber = (str) => {
                     if (!str || typeof str !== 'string') return 0;
                     return parseFloat(str.replace(/\./g, '').replace(',', '.'));
@@ -239,41 +239,81 @@
                 };
 
                 // 1. NOME DA UNIDADE CONSUMIDORA (Ponto de partida)
-                let match = text.match(/DADOS\s+DA\s+UNIDADE\s+CONSUMIDORA\s+([A-Z\s\d]+)/i);
-                if (match && match[1]) {
-                    // Remove address details that might follow
-                    data.nomeUnidade = match[1].trim().split(/\s{2,}/)[0]; 
+                const unidadeIndex = lines.findIndex(line => line.toUpperCase().includes('DADOS DA UNIDADE CONSUMIDORA'));
+                if (unidadeIndex !== -1) {
+                    for (let i = unidadeIndex + 1; i < Math.min(unidadeIndex + 5, lines.length); i++) {
+                        const potentialName = lines[i].trim();
+                        if (potentialName && potentialName.length > 5 && isNaN(potentialName)) {
+                            data.nomeUnidade = potentialName;
+                            break;
+                        }
+                    }
                 }
-                if (!data.nomeUnidade || data.nomeUnidade.length < 5) {
+                
+                if (!data.nomeUnidade) {
                     console.error("Não foi possível extrair o nome da Unidade Consumidora. A fatura será ignorada.");
                     return null;
                 }
 
-                // 2. TOTAL A PAGAR (essencial)
-                match = text.match(/TOTAL\s+A\s+PAGAR\s*([\d\.,]+)/i);
-                if (match) data.totalPagar = match[1];
-                else {
-                    match = text.match(/Total\s+Consolidado\s*([\d\.,]+)/i);
+                // 2. SCAN ALL LINES FOR OTHER DATA
+                lines.forEach((line, index) => {
+                    const upperLine = line.toUpperCase();
+
+                    // INSTALAÇÃO
+                    if (!data.instalacao && upperLine.includes('INSTALAÇÃO')) {
+                        let match = line.match(/(\d[\d\s]{6,}\d)/);
+                        if (match) data.instalacao = match[0].replace(/\s/g, '');
+                    }
+
+                    // CONTA MÊS
+                    if (!data.contaMes && upperLine.includes('CONTA MÊS')) {
+                        let match = line.match(/([A-Z]{3}\/\d{4})/);
+                        if (match) data.contaMes = match[0];
+                    }
+
+                    // TOTAL A PAGAR
+                    if (!data.totalPagar && upperLine.includes('TOTAL A PAGAR')) {
+                        let match = line.match(/([\d\.,]+)/g);
+                        if (match && match.length > 0) {
+                            data.totalPagar = match[match.length - 1];
+                        }
+                    }
+                    
+                    // VALOR IRRF
+                    if (!data.valorIRRF && line.includes('Retenção Consumo IRRF')) {
+                        let match = line.match(/([\d\.,]+)/);
+                        if (match) data.valorIRRF = match[0];
+                    }
+
+                    // QUANTIDADE FATURADA
+                    if (!data.qtdFaturada && (line.includes('Consumo Uso Sistema') || line.includes('Custo Disp Uso Sistema'))) {
+                         const match = line.match(/[A-Z]{3}\/\d{2,}\s+([\d\.,]+)\s+KWh/i);
+                         if(match && match[1]) {
+                             data.qtdFaturada = match[1];
+                         }
+                    }
+                });
+
+                // 3. FALLBACKS using the full text joined with spaces for robustness
+                const fullText = lines.join(' ');
+                if (!data.totalPagar) {
+                    let match = fullText.match(/Total Consolidado\s+([\d\.,]+)/i);
                     if (match) data.totalPagar = match[1];
                 }
+                if (!data.instalacao) {
+                    let match = fullText.match(/INSTALAÇÃO\s*(\d[\d\s]*\d)/i);
+                    if (match) data.instalacao = match[1].replace(/\s/g, '');
+                }
+                if (!data.contaMes) {
+                    let match = fullText.match(/CONTA MÊS\s*([A-Z]{3}\/\d{4})/i);
+                    if (match) data.contaMes = match[1];
+                }
+                 if (!data.qtdFaturada) {
+                    let match = fullText.match(/(?:Consumo Uso Sistema|Custo Disp Uso Sistema)\s+\(KWH-TUSD.*?\s+([A-Z]{3}\/\d{2,})\s+([\d\.,]+)/i);
+                    if (match) data.qtdFaturada = match[2];
+                }
 
-                // 3. INSTALAÇÃO (essencial)
-                match = text.match(/INSTALAÇÃO\s*(\d[\d\s]*\d)/i);
-                if (match) data.instalacao = match[1].replace(/\s/g, '');
-
-                // 4. CONTA MÊS
-                match = text.match(/CONTA\s+MÊS\s*([A-Z]{3}\/\d{4})/i);
-                if (match) data.contaMes = match[1];
-
-                // 5. VALOR IRRF
-                match = text.match(/Retenção\s+Consumo\s+IRRF.*?([\d\.,]+)/i);
-                if (match) data.valorIRRF = match[1];
-                
-                // 6. QUANTIDADE FATURADA
-                match = text.match(/(?:Consumo Uso Sistema|Custo Disp Uso Sistema)\s+\(KWH-TUSD.*?\s+([A-Z]{3}\/\d{2,})\s+([\d\.,]+)/i);
-                if (match) data.qtdFaturada = match[2];
-
-                // VALIDAÇÃO FINAL
+                // 4. FINAL VALIDATION
                 if (!data.instalacao || !data.totalPagar) {
                     console.warn("Dados essenciais (Instalação ou Total a Pagar) não encontrados para:", data.nomeUnidade);
                     return null;
